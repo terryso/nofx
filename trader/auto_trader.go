@@ -491,8 +491,6 @@ func (at *AutoTrader) runCycle() error {
 		ctx.Account.TotalEquity, ctx.Account.AvailableBalance, ctx.Account.PositionCount)
 
 	// 5. 调用AI获取完整决策
-	logger.Infof("🧠 AI分析中... 模板: %s | 账户: %.2f USDT | 持仓: %d | 市场活跃度: %d个交易对",
-		at.systemPromptTemplate, totalEquity, positionCount, 9) // 使用默认9个主流币种
 	decision, err := decision.GetFullDecisionWithCustomPrompt(ctx, at.mcpClient, at.customPrompt, at.overrideBasePrompt, at.systemPromptTemplate)
 
 	// 即使有错误，也保存思维链、决策和输入prompt（用于debug）
@@ -529,6 +527,48 @@ func (at *AutoTrader) runCycle() error {
 
 		at.decisionLogger.LogDecision(record)
 		return fmt.Errorf("获取AI决策失败: %w", err)
+	}
+
+	// AI分析完成，输出决策摘要
+	if len(decision.Decisions) > 0 {
+		var openCount, closeCount, holdCount, updateCount int
+		var decisionSummary []string
+
+		for _, d := range decision.Decisions {
+			switch d.Action {
+			case "open_long", "open_short":
+				openCount++
+				decisionSummary = append(decisionSummary, fmt.Sprintf("%s %s", d.Symbol, d.Action))
+			case "close_long", "close_short":
+				closeCount++
+				decisionSummary = append(decisionSummary, fmt.Sprintf("%s %s", d.Symbol, d.Action))
+			case "hold", "wait":
+				holdCount++
+				// 也记录观望的币种
+				decisionSummary = append(decisionSummary, fmt.Sprintf("%s 观望", d.Symbol))
+			case "update_stop_loss", "update_take_profit":
+				updateCount++
+				decisionSummary = append(decisionSummary, fmt.Sprintf("%s 调整", d.Symbol))
+			}
+		}
+
+		// 构建详情字符串，避免空列表和转义符
+		var detailStr string
+		if len(decisionSummary) > 0 {
+			detailStr = strings.Join(decisionSummary, ", ")
+		} else {
+			detailStr = "无具体操作"
+		}
+
+		logger.Infof("🧠 AI分析完成 | 模板: %s | 决策: 开仓%d个 平仓%d个 调整%d个 观望%d个 | 详情: %s",
+			at.systemPromptTemplate, openCount, closeCount, updateCount, holdCount, detailStr)
+
+		// 发送详细AI分析到Telegram（如果有思维链内容）
+		if decision.CoTTrace != "" && decision.CoTTrace != "AI思考过程被隐藏" {
+			at.sendDetailedAnalysisToTelegram(decision, ctx)
+		}
+	} else {
+		logger.Infof("🧠 AI分析完成 | 模板: %s | 无决策指令", at.systemPromptTemplate)
 	}
 
 	// // 5. 打印系统提示词
@@ -1006,6 +1046,28 @@ func (at *AutoTrader) executeCloseLongWithRecord(decision *decision.Decision, ac
 					}
 					if positionAmt, ok := pos["positionAmt"].(float64); ok {
 						positionQuantity = positionAmt
+						if positionQuantity < 0 {
+							positionQuantity = -positionQuantity // 确保数量为正数
+						}
+					}
+					break
+				} else if side, ok := pos["side"].(string); ok && side == "long" {
+					// 备用匹配方式：如果positionSide字段不存在，使用side字段
+					if unrealizedPnL, ok := pos["unRealizedProfit"].(float64); ok {
+						preClosePnL = unrealizedPnL
+						log.Printf("  ✅ 获取到未实现盈亏: %.2f USDT (备用方式)", preClosePnL)
+					} else if unrealizedPnL, ok := pos["unrealizedPnL"].(float64); ok {
+						preClosePnL = unrealizedPnL
+						log.Printf("  ✅ 获取到未实现盈亏: %.2f USDT (备用方式)", preClosePnL)
+					}
+					if unrealizedPnlPct, ok := pos["unrealizedPnlPct"].(float64); ok {
+						preClosePnLPct = unrealizedPnlPct
+					}
+					if positionAmt, ok := pos["positionAmt"].(float64); ok {
+						positionQuantity = positionAmt
+						if positionQuantity < 0 {
+							positionQuantity = -positionQuantity // 确保数量为正数
+						}
 					}
 					break
 				}
@@ -1014,7 +1076,9 @@ func (at *AutoTrader) executeCloseLongWithRecord(decision *decision.Decision, ac
 		if preClosePnL == 0 {
 			log.Printf("  ⚠️ 平仓前盈亏为0，可能交易所API未返回正确的盈亏数据")
 		}
-		// 注意：从决策推算数量的逻辑在获取marketData之后进行
+		if positionQuantity == 0 {
+			log.Printf("  ⚠️ 平仓前数量为0，可能持仓已不存在或数据获取失败")
+		}
 	} else {
 		log.Printf("  ❌ 获取持仓信息失败: %v", err)
 	}
@@ -1090,6 +1154,28 @@ func (at *AutoTrader) executeCloseShortWithRecord(decision *decision.Decision, a
 					}
 					if positionAmt, ok := pos["positionAmt"].(float64); ok {
 						positionQuantity = positionAmt
+						if positionQuantity < 0 {
+							positionQuantity = -positionQuantity // 确保数量为正数
+						}
+					}
+					break
+				} else if side, ok := pos["side"].(string); ok && side == "short" {
+					// 备用匹配方式：如果positionSide字段不存在，使用side字段
+					if unrealizedPnL, ok := pos["unRealizedProfit"].(float64); ok {
+						preClosePnL = unrealizedPnL
+						log.Printf("  ✅ 获取到未实现盈亏: %.2f USDT (备用方式)", preClosePnL)
+					} else if unrealizedPnL, ok := pos["unrealizedPnL"].(float64); ok {
+						preClosePnL = unrealizedPnL
+						log.Printf("  ✅ 获取到未实现盈亏: %.2f USDT (备用方式)", preClosePnL)
+					}
+					if unrealizedPnlPct, ok := pos["unrealizedPnlPct"].(float64); ok {
+						preClosePnLPct = unrealizedPnlPct
+					}
+					if positionAmt, ok := pos["positionAmt"].(float64); ok {
+						positionQuantity = positionAmt
+						if positionQuantity < 0 {
+							positionQuantity = -positionQuantity // 确保数量为正数
+						}
 					}
 					break
 				}
@@ -1098,7 +1184,9 @@ func (at *AutoTrader) executeCloseShortWithRecord(decision *decision.Decision, a
 		if preClosePnL == 0 {
 			log.Printf("  ⚠️ 平仓前盈亏为0，可能交易所API未返回正确的盈亏数据")
 		}
-		// 注意：从决策推算数量的逻辑在获取marketData之后进行
+		if positionQuantity == 0 {
+			log.Printf("  ⚠️ 平仓前数量为0，可能持仓已不存在或数据获取失败")
+		}
 	} else {
 		log.Printf("  ❌ 获取持仓信息失败: %v", err)
 	}
@@ -1853,4 +1941,75 @@ func (at *AutoTrader) ClearPeakPnLCache(symbol, side string) {
 
 	posKey := symbol + "_" + side
 	delete(at.peakPnLCache, posKey)
+}
+
+// sendDetailedAnalysisToTelegram 发送详细AI分析到Telegram
+func (at *AutoTrader) sendDetailedAnalysisToTelegram(decision *decision.FullDecision, ctx *decision.Context) {
+	// 构建详细分析消息
+	var message strings.Builder
+
+	// 标题
+	message.WriteString(fmt.Sprintf("🤖 *AI详细分析报告*\n\n"))
+
+	// 基本信息
+	message.WriteString(fmt.Sprintf("📊 *账户状态*\n"))
+	message.WriteString(fmt.Sprintf("• 净值: `%.2f USDT`\n", ctx.Account.TotalEquity))
+	message.WriteString(fmt.Sprintf("• 可用: `%.2f USDT`\n", ctx.Account.AvailableBalance))
+	message.WriteString(fmt.Sprintf("• 持仓: `%d` 个\n", ctx.Account.PositionCount))
+	message.WriteString(fmt.Sprintf("• 总盈亏: `%.2f USDT (%.2f%%)`\n\n", ctx.Account.TotalPnL, ctx.Account.TotalPnLPct))
+
+	// AI思维链（格式化处理）
+	message.WriteString(fmt.Sprintf("🧠 *AI分析过程*\n"))
+
+	// 处理长文本，分割思维链为适合Telegram的长度
+	cotTrace := decision.CoTTrace
+	if len(cotTrace) > 3000 {
+		// 如果太长，截取前面部分
+		cotTrace = cotTrace[:3000] + "...\n\n*(分析过长已截断，查看前端获取完整内容)*"
+	}
+
+	// 格式化思维链，使其更适合Telegram显示
+	cotTrace = strings.ReplaceAll(cotTrace, "\n\n", "\n")
+	cotTrace = strings.ReplaceAll(cotTrace, "###", "•")
+	cotTrace = strings.ReplaceAll(cotTrace, "**", "*")
+
+	message.WriteString(fmt.Sprintf("```\n%s\n```\n\n", cotTrace))
+
+	// 决策摘要
+	message.WriteString(fmt.Sprintf("📋 *决策摘要*\n"))
+	for i, d := range decision.Decisions {
+		actionDesc := ""
+		switch d.Action {
+		case "open_long":
+			actionDesc = "开多仓"
+		case "open_short":
+			actionDesc = "开空仓"
+		case "close_long":
+			actionDesc = "平多仓"
+		case "close_short":
+			actionDesc = "平空仓"
+		case "hold", "wait":
+			actionDesc = "观望"
+		case "update_stop_loss":
+			actionDesc = "调整止损"
+		case "update_take_profit":
+			actionDesc = "调整止盈"
+		default:
+			actionDesc = d.Action
+		}
+
+		message.WriteString(fmt.Sprintf("%d. *%s* - %s", i+1, d.Symbol, actionDesc))
+		if d.Reasoning != "" && len(d.Reasoning) < 100 {
+			message.WriteString(fmt.Sprintf("\n   理由: %s", d.Reasoning))
+		}
+		if d.Action == "open_long" || d.Action == "open_short" {
+			message.WriteString(fmt.Sprintf("\n   仓位: `%.2f USDT` | 杠杆: `%dx`", d.PositionSizeUSD, d.Leverage))
+		}
+		message.WriteString("\n")
+	}
+
+	message.WriteString(fmt.Sprintf("\n⏰ _%s_", time.Now().Format("2006-01-02 15:04:05")))
+
+	// 发送到Telegram
+	logger.Info(message.String())
 }

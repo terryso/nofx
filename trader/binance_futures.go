@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"math"
 	"nofx/hook"
 	"strconv"
 	"strings"
@@ -195,6 +196,23 @@ func (t *FuturesTrader) GetPositions() ([]map[string]interface{}, error) {
 		posMap["unRealizedProfit"], _ = strconv.ParseFloat(pos.UnRealizedProfit, 64)
 		posMap["leverage"], _ = strconv.ParseFloat(pos.Leverage, 64)
 		posMap["liquidationPrice"], _ = strconv.ParseFloat(pos.LiquidationPrice, 64)
+
+		// 添加 positionSide 字段以保持兼容性
+		posMap["positionSide"] = pos.PositionSide
+
+		// 添加计算盈亏百分比
+		unrealizedProfit, _ := strconv.ParseFloat(pos.UnRealizedProfit, 64)
+		markPrice, _ := strconv.ParseFloat(pos.MarkPrice, 64)
+		leverage, _ := strconv.ParseFloat(pos.Leverage, 64)
+
+		// 计算保证金使用量
+		marginUsed := (math.Abs(posAmt) * markPrice) / leverage
+		if marginUsed > 0 {
+			unrealizedPnlPct := (unrealizedProfit / marginUsed) * 100
+			posMap["unrealizedPnlPct"] = unrealizedPnlPct
+		} else {
+			posMap["unrealizedPnlPct"] = 0.0
+		}
 
 		// 判断方向
 		if posAmt > 0 {
