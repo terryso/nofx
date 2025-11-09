@@ -770,6 +770,12 @@ func (tm *TraderManager) LoadUserTraders(database *config.Database, userID strin
 		return fmt.Errorf("获取AI模型配置失败: %w", err)
 	}
 
+	log.Printf("🔍 为用户 %s 找到 %d 个AI模型配置:", userID, len(aiModels))
+	for _, model := range aiModels {
+		log.Printf("  - AI模型: %s (provider: %s, enabled: %t, api_key_length: %d)",
+			model.ID, model.Provider, model.Enabled, len(model.APIKey))
+	}
+
 	exchanges, err := database.GetExchanges(userID)
 	if err != nil {
 		log.Printf("⚠️ 获取用户 %s 的交易所配置失败: %v", userID, err)
@@ -785,12 +791,14 @@ func (tm *TraderManager) LoadUserTraders(database *config.Database, userID strin
 		}
 
 		// 从已查询的列表中查找AI模型配置
+		log.Printf("🔍 交易员 %s 正在查找AI模型配置: %s", traderCfg.Name, traderCfg.AIModelID)
 
 		var aiModelCfg *config.AIModelConfig
 		// 优先精确匹配 model.ID（新版逻辑）
 		for _, model := range aiModels {
 			if model.ID == traderCfg.AIModelID {
 				aiModelCfg = model
+				log.Printf("✅ 交易员 %s 找到精确匹配的AI模型: %s", traderCfg.Name, model.ID)
 				break
 			}
 		}
@@ -806,14 +814,21 @@ func (tm *TraderManager) LoadUserTraders(database *config.Database, userID strin
 		}
 
 		if aiModelCfg == nil {
-			log.Printf("⚠️ 交易员 %s 的AI模型 %s 不存在，跳过", traderCfg.Name, traderCfg.AIModelID)
+			log.Printf("❌ 交易员 %s 的AI模型 %s 不存在，跳过", traderCfg.Name, traderCfg.AIModelID)
 			continue
 		}
 
 		if !aiModelCfg.Enabled {
-			log.Printf("⚠️ 交易员 %s 的AI模型 %s 未启用，跳过", traderCfg.Name, traderCfg.AIModelID)
+			log.Printf("❌ 交易员 %s 的AI模型 %s 未启用，跳过", traderCfg.Name, traderCfg.AIModelID)
 			continue
 		}
+
+		if aiModelCfg.APIKey == "" {
+			log.Printf("❌ 交易员 %s 的AI模型 %s API密钥为空，跳过", traderCfg.Name, traderCfg.AIModelID)
+			continue
+		}
+
+		log.Printf("✅ 交易员 %s 的AI模型配置验证通过: %s (provider: %s)", traderCfg.Name, aiModelCfg.ID, aiModelCfg.Provider)
 
 		// 从已查询的列表中查找交易所配置
 		var exchangeCfg *config.ExchangeConfig

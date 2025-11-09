@@ -11,6 +11,7 @@ import (
 	"nofx/crypto"
 	"nofx/decision"
 	"nofx/hook"
+	"nofx/logger"
 	"nofx/manager"
 	"nofx/trader"
 	"strconv"
@@ -131,6 +132,7 @@ func (s *Server) setupRoutes() {
 			protected.POST("/traders/:id/stop", s.handleStopTrader)
 			protected.PUT("/traders/:id/prompt", s.handleUpdateTraderPrompt)
 			protected.POST("/traders/:id/sync-balance", s.handleSyncBalance)
+			protected.GET("/traders/:id/status", s.handleGetTraderStatus)
 
 			// AI模型配置
 			protected.GET("/models", s.handleGetModelConfigs)
@@ -642,17 +644,20 @@ func (s *Server) handleCreateTrader(c *gin.Context) {
 
 // UpdateTraderRequest 更新交易员请求
 type UpdateTraderRequest struct {
-	Name                string  `json:"name" binding:"required"`
-	AIModelID           string  `json:"ai_model_id" binding:"required"`
-	ExchangeID          string  `json:"exchange_id" binding:"required"`
-	InitialBalance      float64 `json:"initial_balance"`
-	ScanIntervalMinutes int     `json:"scan_interval_minutes"`
-	BTCETHLeverage      int     `json:"btc_eth_leverage"`
-	AltcoinLeverage     int     `json:"altcoin_leverage"`
-	TradingSymbols      string  `json:"trading_symbols"`
-	CustomPrompt        string  `json:"custom_prompt"`
-	OverrideBasePrompt  bool    `json:"override_base_prompt"`
-	IsCrossMargin       *bool   `json:"is_cross_margin"`
+	Name                   string  `json:"name" binding:"required"`
+	AIModelID              string  `json:"ai_model_id" binding:"required"`
+	ExchangeID             string  `json:"exchange_id" binding:"required"`
+	InitialBalance         float64 `json:"initial_balance"`
+	ScanIntervalMinutes    int     `json:"scan_interval_minutes"`
+	BTCETHLeverage         int     `json:"btc_eth_leverage"`
+	AltcoinLeverage        int     `json:"altcoin_leverage"`
+	TradingSymbols         string  `json:"trading_symbols"`
+	CustomPrompt           string  `json:"custom_prompt"`
+	OverrideBasePrompt     bool    `json:"override_base_prompt"`
+	SystemPromptTemplate   string  `json:"system_prompt_template"`
+	UseCoinPool            bool    `json:"use_coin_pool"`
+	UseOITop               bool    `json:"use_oi_top"`
+	IsCrossMargin          *bool   `json:"is_cross_margin"`
 }
 
 // handleUpdateTrader 更新交易员配置
@@ -710,6 +715,12 @@ func (s *Server) handleUpdateTrader(c *gin.Context) {
 		scanIntervalMinutes = 3
 	}
 
+	// 设置系统提示词模板，如果为空则保持原值
+	systemPromptTemplate := existingTrader.SystemPromptTemplate
+	if req.SystemPromptTemplate != "" {
+		systemPromptTemplate = req.SystemPromptTemplate
+	}
+
 	// 更新交易员配置
 	trader := &config.TraderRecord{
 		ID:                   traderID,
@@ -723,7 +734,9 @@ func (s *Server) handleUpdateTrader(c *gin.Context) {
 		TradingSymbols:       req.TradingSymbols,
 		CustomPrompt:         req.CustomPrompt,
 		OverrideBasePrompt:   req.OverrideBasePrompt,
-		SystemPromptTemplate: existingTrader.SystemPromptTemplate, // 保持原值
+		SystemPromptTemplate: systemPromptTemplate,
+		UseCoinPool:          req.UseCoinPool,
+		UseOITop:             req.UseOITop,
 		IsCrossMargin:        isCrossMargin,
 		ScanIntervalMinutes:  scanIntervalMinutes,
 		IsRunning:            existingTrader.IsRunning, // 保持原值
@@ -769,7 +782,7 @@ func (s *Server) handleDeleteTrader(c *gin.Context) {
 		status := trader.GetStatus()
 		if isRunning, ok := status["is_running"].(bool); ok && isRunning {
 			trader.Stop()
-			log.Printf("⏹  已停止运行中的交易员: %s", traderID)
+			logger.Infof("⏹  已停止运行中的交易员: %s", traderID)
 		}
 	}
 
@@ -804,9 +817,9 @@ func (s *Server) handleStartTrader(c *gin.Context) {
 
 	// 启动交易员
 	go func() {
-		log.Printf("▶️  启动交易员 %s (%s)", traderID, trader.GetName())
+		logger.Infof("▶️  启动交易员 %s (%s)", traderID, trader.GetName())
 		if err := trader.Run(); err != nil {
-			log.Printf("❌ 交易员 %s 运行错误: %v", trader.GetName(), err)
+			logger.Errorf("❌ 交易员 %s 运行错误: %v", trader.GetName(), err)
 		}
 	}()
 
@@ -854,7 +867,7 @@ func (s *Server) handleStopTrader(c *gin.Context) {
 		log.Printf("⚠️  更新交易员状态失败: %v", err)
 	}
 
-	log.Printf("⏹  交易员 %s 已停止", trader.GetName())
+	logger.Infof("⏹  交易员 %s 已停止", trader.GetName())
 	c.JSON(http.StatusOK, gin.H{"message": "交易员已停止"})
 }
 
@@ -1307,6 +1320,7 @@ func (s *Server) handleGetTraderConfig(c *gin.Context) {
 		"trading_symbols":       traderConfig.TradingSymbols,
 		"custom_prompt":         traderConfig.CustomPrompt,
 		"override_base_prompt":  traderConfig.OverrideBasePrompt,
+		"system_prompt_template": traderConfig.SystemPromptTemplate,
 		"is_cross_margin":       traderConfig.IsCrossMargin,
 		"use_coin_pool":         traderConfig.UseCoinPool,
 		"use_oi_top":            traderConfig.UseOITop,
@@ -1314,6 +1328,42 @@ func (s *Server) handleGetTraderConfig(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, result)
+}
+
+// handleGetTraderStatus 获取交易员详细状态（包括当前使用的提示词模板）
+func (s *Server) handleGetTraderStatus(c *gin.Context) {
+	userID := c.GetString("user_id")
+	traderID := c.Param("id")
+
+	if traderID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "交易员ID不能为空"})
+		return
+	}
+
+	// 验证交易员属于当前用户
+	_, _, _, err := s.database.GetTraderConfig(userID, traderID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "交易员不存在"})
+		return
+	}
+
+	// 获取交易员实例
+	trader, err := s.traderManager.GetTrader(traderID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "交易员未运行"})
+		return
+	}
+
+	// 获取状态信息
+	status := trader.GetStatus()
+
+	// 添加提示词模板信息
+	status["system_prompt_template"] = trader.GetSystemPromptTemplate()
+
+	// 添加AI模型信息
+	status["ai_model"] = trader.GetAIModel()
+
+	c.JSON(http.StatusOK, status)
 }
 
 // handleStatus 系统状态

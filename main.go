@@ -6,8 +6,10 @@ import (
 	"log"
 	"nofx/api"
 	"nofx/auth"
+	"nofx/bootstrap"
 	"nofx/config"
 	"nofx/crypto"
+	"nofx/logger"
 	"nofx/manager"
 	"nofx/market"
 	"nofx/pool"
@@ -100,6 +102,16 @@ func syncConfigToDatabase(database *config.Database, configFile *ConfigFile) err
 	// 如果JWT密钥不为空，也同步
 	if configFile.JWTSecret != "" {
 		configs["jwt_secret"] = configFile.JWTSecret
+	}
+
+	// 同步log配置
+	if configFile.Log != nil {
+		logJSON, err := json.Marshal(configFile.Log)
+		if err == nil {
+			configs["log"] = string(logJSON)
+		} else {
+			log.Printf("⚠️  序列化log配置失败: %v", err)
+		}
 	}
 
 	// 更新数据库配置
@@ -294,14 +306,34 @@ func main() {
 		}
 	}
 
+	// 从数据库读取日志配置
+	logConfigJSON, _ := database.GetSystemConfig("log")
+	var logConfig *config.LogConfig
+	if logConfigJSON != "" {
+		if err := json.Unmarshal([]byte(logConfigJSON), &logConfig); err != nil {
+			log.Printf("⚠️  解析log配置失败: %v", err)
+			logConfig = nil
+		}
+	}
+
+	// 初始化日志系统（包括Telegram）
+	if logConfig != nil {
+		if err := logger.InitFromLogConfig(logConfig); err != nil {
+			log.Fatalf("初始化日志系统失败: %v", err)
+		}
+	} else {
+		if err := logger.InitWithSimpleConfig("info"); err != nil {
+			log.Fatalf("初始化日志系统失败: %v", err)
+		}
+	}
+
 	// 创建初始化上下文
 	// TODO : 传入实际配置, 现在并未实际使用，未来所有模块初始化都将通过上下文传递配置
-	// ctx := bootstrap.NewContext(&config.Config{})
-
-	// // 执行所有初始化钩子
-	// if err := bootstrap.Run(ctx); err != nil {
-	// 	log.Fatalf("初始化失败: %v", err)
-	// }
+	// 执行所有初始化钩子
+	ctx := bootstrap.NewContext(&config.Config{})
+	if err := bootstrap.Run(ctx); err != nil {
+		log.Fatalf("初始化失败: %v", err)
+	}
 
 	fmt.Println()
 	fmt.Println("🤖 AI全权决策模式:")

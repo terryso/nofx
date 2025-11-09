@@ -2,7 +2,6 @@ package logger
 
 import (
 	"fmt"
-	"runtime"
 	"strings"
 
 	"github.com/sirupsen/logrus"
@@ -71,36 +70,15 @@ func (h *TelegramHook) formatMessage(entry *logrus.Entry) string {
 	// 基本信息
 	var builder strings.Builder
 	builder.WriteString(fmt.Sprintf("%s *%s*: 系统日志警报\n", levelEmoji, strings.ToUpper(entry.Level.String())))
-	builder.WriteString(fmt.Sprintf("📝 消息: `%s`\n", escapeMarkdown(entry.Message)))
+	builder.WriteString(fmt.Sprintf("📝 消息: `%s`", escapeMarkdown(entry.Message)))
 
 	// 字段信息
 	if len(entry.Data) > 0 {
-		builder.WriteString("📊 字段:\n")
+		builder.WriteString("\n📊 字段:\n")
 		for key, value := range entry.Data {
 			builder.WriteString(fmt.Sprintf("  • %s: `%v`\n", key, value))
 		}
 	}
-
-	// 调用位置
-	if entry.HasCaller() {
-		file := entry.Caller.File
-		// 只保留相对路径
-		if idx := strings.Index(file, "nofx/"); idx >= 0 {
-			file = file[idx:]
-		}
-		builder.WriteString(fmt.Sprintf("📍 位置: `%s:%d`\n", file, entry.Caller.Line))
-	} else {
-		// 如果entry没有caller，手动获取
-		if _, file, line, ok := runtime.Caller(8); ok {
-			if idx := strings.Index(file, "nofx/"); idx >= 0 {
-				file = file[idx:]
-			}
-			builder.WriteString(fmt.Sprintf("📍 位置: `%s:%d`\n", file, line))
-		}
-	}
-
-	// 时间戳
-	builder.WriteString(fmt.Sprintf("🕐 时间: `%s`", entry.Time.Format("2006-01-02 15:04:05")))
 
 	return builder.String()
 }
@@ -127,25 +105,13 @@ func (h *TelegramHook) getLevelEmoji(level logrus.Level) string {
 
 // escapeMarkdown 转义Markdown特殊字符
 func escapeMarkdown(text string) string {
+	// 只转义在Markdown中有特殊含义且会破坏格式的字符
+	// 保留常见标点符号，避免过度转义
 	replacer := strings.NewReplacer(
-		"_", "\\_",
-		"*", "\\*",
-		"[", "\\[",
-		"]", "\\]",
-		"(", "\\(",
-		")", "\\)",
-		"~", "\\~",
-		"`", "\\`",
-		">", "\\>",
-		"#", "\\#",
-		"+", "\\+",
-		"-", "\\-",
-		"=", "\\=",
-		"|", "\\|",
-		"{", "\\{",
-		"}", "\\}",
-		".", "\\.",
-		"!", "\\!",
+		"*", "\\*",   // 粗体/斜体
+		"`", "\\`",   // 行内代码
+		"[", "\\[",   // 链接开始
+		"]", "\\]",   // 链接结束
 	)
 	return replacer.Replace(text)
 }

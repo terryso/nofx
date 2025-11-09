@@ -137,6 +137,14 @@ func (client *Client) CallWithMessages(systemPrompt, userPrompt string) (string,
 		return "", fmt.Errorf("AI API密钥未设置，请先调用 SetDeepSeekAPIKey() 或 SetQwenAPIKey()")
 	}
 
+	// 调试：显示当前使用的系统提示词模板信息
+	fmt.Printf("🤖 AI调用 - 系统提示词长度: %d 字符\n", len(systemPrompt))
+	if len(systemPrompt) > 200 {
+		fmt.Printf("🤖 AI调用 - 系统提示词前200字符: %s...\n", systemPrompt[:200])
+	} else {
+		fmt.Printf("🤖 AI调用 - 完整系统提示词: %s\n", systemPrompt)
+	}
+
 	// 重试配置
 	maxRetries := 3
 	var lastErr error

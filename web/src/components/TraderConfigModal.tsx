@@ -73,7 +73,15 @@ export function TraderConfigModal({
 
   useEffect(() => {
     if (traderData) {
-      setFormData(traderData)
+      // 确保数据完整性，特别是 system_prompt_template 字段
+      const completeData = {
+        ...traderData,
+        system_prompt_template: traderData.system_prompt_template || 'default',
+        use_coin_pool: traderData.use_coin_pool ?? false,
+        use_oi_top: traderData.use_oi_top ?? false,
+      }
+      setFormData(completeData)
+
       // 设置已选择的币种
       if (traderData.trading_symbols) {
         const coins = traderData.trading_symbols
@@ -99,13 +107,6 @@ export function TraderConfigModal({
         initial_balance: 1000,
         scan_interval_minutes: 3,
       })
-    }
-    // 确保旧数据也有默认的 system_prompt_template
-    if (traderData && traderData.system_prompt_template === undefined) {
-      setFormData((prev) => ({
-        ...prev,
-        system_prompt_template: 'default',
-      }))
     }
   }, [traderData, isEditMode, availableModels, availableExchanges])
 
@@ -146,8 +147,13 @@ export function TraderConfigModal({
         }
       } catch (error) {
         console.error('Failed to fetch prompt templates:', error)
-        // 使用默认模板列表
-        setPromptTemplates([{ name: 'default' }, { name: 'aggressive' }])
+        // 使用默认模板列表，包含所有已知的策略
+        setPromptTemplates([
+          { name: 'default' },
+          { name: 'Hansen' },
+          { name: 'taro_long_prompts' },
+          { name: 'nof1' }
+        ])
       }
     }
     fetchPromptTemplates()
@@ -247,6 +253,7 @@ export function TraderConfigModal({
         initial_balance: formData.initial_balance,
         scan_interval_minutes: formData.scan_interval_minutes,
       }
+
       await onSave(saveData)
       onClose()
     } catch (error) {
@@ -632,8 +639,12 @@ export function TraderConfigModal({
                         ? 'Default (默认稳健)'
                         : template.name === 'aggressive'
                           ? 'Aggressive (激进)'
-                          : template.name.charAt(0).toUpperCase() +
-                            template.name.slice(1)}
+                          : template.name === 'Hansen'
+                            ? 'Hansen (稳健保守)'
+                            : template.name === 'taro_long_prompts'
+                              ? 'Taro Long (激进多周期)'
+                              : template.name.charAt(0).toUpperCase() +
+                                template.name.slice(1)}
                     </option>
                   ))}
                 </select>

@@ -709,11 +709,9 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 	// 开仓操作必须提供完整参数
 	if d.Action == "open_long" || d.Action == "open_short" {
 		// 根据币种使用配置的杠杆上限
-		maxLeverage := altcoinLeverage          // 山寨币使用配置的杠杆
-		maxPositionValue := accountEquity * 1.5 // 山寨币最多1.5倍账户净值
+		maxLeverage := altcoinLeverage // 山寨币使用配置的杠杆
 		if d.Symbol == "BTCUSDT" || d.Symbol == "ETHUSDT" {
-			maxLeverage = btcEthLeverage          // BTC和ETH使用配置的杠杆
-			maxPositionValue = accountEquity * 10 // BTC/ETH最多10倍账户净值
+			maxLeverage = btcEthLeverage // BTC和ETH使用配置的杠杆
 		}
 
 		if d.Leverage <= 0 || d.Leverage > maxLeverage {
@@ -738,15 +736,32 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 			}
 		}
 
-		// 验证仓位价值上限（加1%容差以避免浮点数精度问题）
-		tolerance := maxPositionValue * 0.01 // 1%容差
-		if d.PositionSizeUSD > maxPositionValue+tolerance {
-			if d.Symbol == "BTCUSDT" || d.Symbol == "ETHUSDT" {
-				return fmt.Errorf("BTC/ETH单币种仓位价值不能超过%.0f USDT（10倍账户净值），实际: %.0f", maxPositionValue, d.PositionSizeUSD)
-			} else {
-				return fmt.Errorf("山寨币单币种仓位价值不能超过%.0f USDT（1.5倍账户净值），实际: %.0f", maxPositionValue, d.PositionSizeUSD)
-			}
+		// 🎯 新风控逻辑：基于保证金占用比例而非仓位价值
+		marginUsed := d.PositionSizeUSD / float64(d.Leverage) // 实际占用保证金
+
+		// 单币种保证金占用限制：山寨币30%，BTC/ETH 40%
+		var maxMarginRatio float64
+		var coinType string
+		if d.Symbol == "BTCUSDT" || d.Symbol == "ETHUSDT" {
+			maxMarginRatio = 0.40 // BTC/ETH单币种最多40%保证金
+			coinType = "BTC/ETH"
+		} else {
+			maxMarginRatio = 0.30 // 山寨币单币种最多30%保证金
+			coinType = "山寨币"
 		}
+
+		maxMarginPerCoin := accountEquity * maxMarginRatio
+		marginRatio := (marginUsed / accountEquity) * 100
+
+		// 验证单币种保证金占用（加1%容差）
+		if marginUsed > maxMarginPerCoin*1.01 { // 1%容差
+			return fmt.Errorf("%s单币种保证金占用不能超过%.0f%%账户净值（%.2f USDT），实际占用%.2f USDT（%.1f%%），仓位价值%.2f USDT",
+				coinType, maxMarginRatio*100, maxMarginPerCoin, marginUsed, marginRatio, d.PositionSizeUSD)
+		}
+
+		// ✅ 风控通过，记录详细信息（调试用）
+		log.Printf("🎯 风控通过: %s | 仓位价值%.2f USDT | 保证金%.2f USDT (%.1f%%) | 单币种限制%.1f%%",
+			d.Symbol, d.PositionSizeUSD, marginUsed, marginRatio, maxMarginRatio*100)
 		if d.StopLoss <= 0 || d.TakeProfit <= 0 {
 			return fmt.Errorf("止损和止盈必须大于0")
 		}
