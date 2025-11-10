@@ -51,6 +51,7 @@ export interface DecisionAction {
   timestamp: string
   success: boolean
   error?: string
+  realized_pnl?: number  // 已实现盈亏（平仓时的实际盈亏）
 }
 
 export interface AccountSnapshot {

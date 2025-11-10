@@ -1120,6 +1120,10 @@ func (at *AutoTrader) executeCloseLongWithRecord(decision *decision.Decision, ac
 
 	logger.Infof("📉 平仓成功: %s | 订单ID: %v | 平仓价格: %.4f | 数量: %.4f | %s 盈亏: %.2f USDT (%.2f%%)",
 		decision.Symbol, order["orderId"], marketData.CurrentPrice, positionQuantity, pnlEmoji, preClosePnL, preClosePnLPct)
+
+	// 保存实时计算的盈亏到actionRecord中
+	actionRecord.RealizedPnL = preClosePnL
+
 	return nil
 }
 
@@ -1228,6 +1232,10 @@ func (at *AutoTrader) executeCloseShortWithRecord(decision *decision.Decision, a
 
 	logger.Infof("📉 平仓成功: %s | 订单ID: %v | 平仓价格: %.4f | 数量: %.4f | %s 盈亏: %.2f USDT (%.2f%%)",
 		decision.Symbol, order["orderId"], marketData.CurrentPrice, positionQuantity, pnlEmoji, preClosePnL, preClosePnLPct)
+
+	// 保存实时计算的盈亏到actionRecord中
+	actionRecord.RealizedPnL = preClosePnL
+
 	return nil
 }
 

@@ -7,6 +7,8 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"time"
 )
 
@@ -50,15 +52,16 @@ type PositionSnapshot struct {
 
 // DecisionAction 决策动作
 type DecisionAction struct {
-	Action    string    `json:"action"`    // open_long, open_short, close_long, close_short, update_stop_loss, update_take_profit, partial_close
-	Symbol    string    `json:"symbol"`    // 币种
-	Quantity  float64   `json:"quantity"`  // 数量（部分平仓时使用）
-	Leverage  int       `json:"leverage"`  // 杠杆（开仓时）
-	Price     float64   `json:"price"`     // 执行价格
-	OrderID   int64     `json:"order_id"`  // 订单ID
-	Timestamp time.Time `json:"timestamp"` // 执行时间
-	Success   bool      `json:"success"`   // 是否成功
-	Error     string    `json:"error"`     // 错误信息
+	Action       string    `json:"action"`         // open_long, open_short, close_long, close_short, update_stop_loss, update_take_profit, partial_close
+	Symbol       string    `json:"symbol"`         // 币种
+	Quantity     float64   `json:"quantity"`       // 数量（部分平仓时使用）
+	Leverage     int       `json:"leverage"`       // 杠杆（开仓时）
+	Price        float64   `json:"price"`          // 执行价格
+	OrderID      int64     `json:"order_id"`       // 订单ID
+	Timestamp    time.Time `json:"timestamp"`      // 执行时间
+	Success      bool      `json:"success"`        // 是否成功
+	Error        string    `json:"error"`          // 错误信息
+	RealizedPnL  float64   `json:"realized_pnl"`   // 已实现盈亏（平仓时的实际盈亏）
 }
 
 // DecisionLogger 决策日志记录器
@@ -124,28 +127,68 @@ func (l *DecisionLogger) GetLatestRecords(n int) ([]*DecisionRecord, error) {
 		return nil, fmt.Errorf("读取日志目录失败: %w", err)
 	}
 
-	// 先按修改时间倒序收集（最新的在前）
-	var records []*DecisionRecord
-	count := 0
-	for i := len(files) - 1; i >= 0 && count < n; i-- {
-		file := files[i]
+	// 过滤有效的JSON文件
+	var validFiles []os.FileInfo
+	skippedFiles := 0
+	for _, file := range files {
 		if file.IsDir() {
 			continue
+		}
+		// 检查文件名格式（decision_YYYYMMDD_HHMMSS_mmm_cycleN.json）
+		if !isValidDecisionFile(file.Name()) {
+			skippedFiles++
+			continue
+		}
+		validFiles = append(validFiles, file)
+	}
+
+	if skippedFiles > 0 {
+		fmt.Printf("[DecisionLogger] 跳过 %d 个无效文件\n", skippedFiles)
+	}
+
+	// 按文件名（时间戳）排序，而不是依赖文件系统顺序
+	// 文件名格式：decision_YYYYMMDD_HHMMSS_mmm_cycleN.json
+	sort.Slice(validFiles, func(i, j int) bool {
+		return validFiles[i].Name() > validFiles[j].Name() // 降序：最新的在前
+	})
+
+	// 读取最新的N条记录
+	var records []*DecisionRecord
+	readCount := 0
+	errorCount := 0
+	for i, file := range validFiles {
+		if i >= n { // 只取前n个
+			break
 		}
 
 		filepath := filepath.Join(l.logDir, file.Name())
 		data, err := ioutil.ReadFile(filepath)
 		if err != nil {
+			errorCount++
+			fmt.Printf("[DecisionLogger] 读取文件失败 %s: %v\n", file.Name(), err)
 			continue
 		}
 
 		var record DecisionRecord
 		if err := json.Unmarshal(data, &record); err != nil {
+			errorCount++
+			fmt.Printf("[DecisionLogger] 解析文件失败 %s: %v\n", file.Name(), err)
+			continue
+		}
+
+		// 验证记录的完整性
+		if record.Timestamp.IsZero() {
+			errorCount++
+			fmt.Printf("[DecisionLogger] 记录时间戳无效 %s\n", file.Name())
 			continue
 		}
 
 		records = append(records, &record)
-		count++
+		readCount++
+	}
+
+	if errorCount > 0 {
+		fmt.Printf("[DecisionLogger] 读取完成：成功 %d 条，错误 %d 条\n", readCount, errorCount)
 	}
 
 	// 反转数组，让时间从旧到新排列（用于图表显示）
@@ -154,6 +197,17 @@ func (l *DecisionLogger) GetLatestRecords(n int) ([]*DecisionRecord, error) {
 	}
 
 	return records, nil
+}
+
+// isValidDecisionFile 检查文件名是否是有效的决策记录文件
+func isValidDecisionFile(filename string) bool {
+	// 决策文件名格式：decision_YYYYMMDD_HHMMSS_cycleN.json 或 decision_YYYYMMDD_HHMMSS_mmm_cycleN.json
+	pattern := `^decision_\d{8}_\d{6}(_\d{3})?_cycle\d+\.json$`
+	matched, err := regexp.MatchString(pattern, filename)
+	if err != nil {
+		return false
+	}
+	return matched
 }
 
 // GetRecordByDate 获取指定日期的所有记录
