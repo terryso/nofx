@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"math"
 	"os"
 	"path/filepath"
@@ -410,23 +411,31 @@ func (l *DecisionLogger) AnalyzePerformance(lookbackCycles int) (*PerformanceAna
 
 				symbol := action.Symbol
 				side := ""
-				if action.Action == "open_long" || action.Action == "close_long" || action.Action == "partial_close" || action.Action == "auto_close_long" {
+				if action.Action == "open_long" || action.Action == "close_long" || action.Action == "auto_close_long" {
 					side = "long"
 				} else if action.Action == "open_short" || action.Action == "close_short" || action.Action == "auto_close_short" {
 					side = "short"
 				}
 
-				// partial_close 需要根據持倉判斷方向
-				if action.Action == "partial_close" && side == "" {
+				// 🔧 BUG FIX：partial_close 必须根据持仓判断方向，不能预设
+				if action.Action == "partial_close" {
+					log.Printf("  🔍 partial_close %s: 查找持仓方向，当前可用持仓: %d", symbol, len(openPositions))
 					for key, pos := range openPositions {
 						if posSymbol, _ := pos["side"].(string); key == symbol+"_"+posSymbol {
 							side = posSymbol
+							log.Printf("  ✅ partial_close %s: 找到持仓方向 %s (key: %s)", symbol, side, key)
 							break
 						}
+					}
+					if side == "" {
+						log.Printf("  ❌ partial_close %s: 未找到对应持仓，无法确定方向", symbol)
 					}
 				}
 
 				posKey := symbol + "_" + side
+				if action.Action == "partial_close" {
+					log.Printf("  📝 partial_close %s: 使用posKey = %s", symbol, posKey)
+				}
 
 				switch action.Action {
 				case "open_long", "open_short":
@@ -456,24 +465,32 @@ func (l *DecisionLogger) AnalyzePerformance(lookbackCycles int) (*PerformanceAna
 
 			symbol := action.Symbol
 			side := ""
-			if action.Action == "open_long" || action.Action == "close_long" || action.Action == "partial_close" || action.Action == "auto_close_long" {
+			if action.Action == "open_long" || action.Action == "close_long" || action.Action == "auto_close_long" {
 				side = "long"
 			} else if action.Action == "open_short" || action.Action == "close_short" || action.Action == "auto_close_short" {
 				side = "short"
 			}
 
-			// partial_close 需要根據持倉判斷方向
+			// 🔧 BUG FIX：partial_close 必须根据持仓判断方向，不能预设
 			if action.Action == "partial_close" {
+				log.Printf("  🔍 partial_close %s: 查找持仓方向，当前可用持仓: %d", symbol, len(openPositions))
 				// 從 openPositions 中查找持倉方向
 				for key, pos := range openPositions {
 					if posSymbol, _ := pos["side"].(string); key == symbol+"_"+posSymbol {
 						side = posSymbol
+						log.Printf("  ✅ partial_close %s: 找到持仓方向 %s (key: %s)", symbol, side, key)
 						break
 					}
+				}
+				if side == "" {
+					log.Printf("  ❌ partial_close %s: 未找到对应持仓，无法确定方向", symbol)
 				}
 			}
 
 			posKey := symbol + "_" + side // 使用symbol_side作为key，区分多空持仓
+			if action.Action == "partial_close" {
+				log.Printf("  📝 partial_close %s: 使用posKey = %s", symbol, posKey)
+			}
 
 			switch action.Action {
 			case "open_long", "open_short":
@@ -514,6 +531,7 @@ func (l *DecisionLogger) AnalyzePerformance(lookbackCycles int) (*PerformanceAna
 						actualQuantity = action.Quantity
 					}
 
+	
 					// 计算本次平仓的盈亏（USDT）
 					var pnl float64
 					if side == "long" {
@@ -569,9 +587,13 @@ func (l *DecisionLogger) AnalyzePerformance(lookbackCycles int) (*PerformanceAna
 							if accumulatedPnL > 0 {
 								analysis.WinningTrades++
 								analysis.AvgWin += accumulatedPnL
+								log.Printf("  💰 盈利交易: %s 盈亏 +%.2f USDT", symbol, accumulatedPnL)
 							} else if accumulatedPnL < 0 {
 								analysis.LosingTrades++
 								analysis.AvgLoss += accumulatedPnL
+								log.Printf("  💸 亏损交易: %s 盈亏 %.2f USDT", symbol, accumulatedPnL)
+							} else {
+								log.Printf("  ⚪ 平局交易: %s 盈亏 0.00 USDT", symbol)
 							}
 
 							// 更新币种统计
@@ -629,9 +651,13 @@ func (l *DecisionLogger) AnalyzePerformance(lookbackCycles int) (*PerformanceAna
 						if totalPnL > 0 {
 							analysis.WinningTrades++
 							analysis.AvgWin += totalPnL
+							log.Printf("  💰 盈利交易: %s 盈亏 +%.2f USDT", symbol, totalPnL)
 						} else if totalPnL < 0 {
 							analysis.LosingTrades++
 							analysis.AvgLoss += totalPnL
+							log.Printf("  💸 亏损交易: %s 盈亏 %.2f USDT", symbol, totalPnL)
+						} else {
+							log.Printf("  ⚪ 平局交易: %s 盈亏 0.00 USDT", symbol)
 						}
 
 						// 更新币种统计
@@ -672,13 +698,27 @@ func (l *DecisionLogger) AnalyzePerformance(lookbackCycles int) (*PerformanceAna
 			analysis.AvgLoss /= float64(analysis.LosingTrades)
 		}
 
-		// Profit Factor = 总盈利 / 总亏损（绝对值）
+		// 🔧 BUG FIX：Profit Factor = 总盈利 / 总亏损（绝对值）
 		// 注意：totalLossAmount 是负数，所以取负号得到绝对值
+		log.Printf("  📊 盈亏比计算: 总盈利=%.2f, 总亏损=%.2f, 盈利交易=%d, 亏损交易=%d",
+			totalWinAmount, totalLossAmount, analysis.WinningTrades, analysis.LosingTrades)
+
 		if totalLossAmount != 0 {
 			analysis.ProfitFactor = totalWinAmount / (-totalLossAmount)
+			log.Printf("  ✅ 盈亏比: %.2f = %.2f / %.2f", analysis.ProfitFactor, totalWinAmount, -totalLossAmount)
 		} else if totalWinAmount > 0 {
-			// 只有盈利没有亏损的情况，设置为一个很大的值表示完美策略
-			analysis.ProfitFactor = 999.0
+			// 🔧 BUG FIX：只有盈利没有亏损的情况，使用更合理的盈亏比
+			// 设置为总盈利金额的倍数，表示风险回报比
+			analysis.ProfitFactor = 10.0 + (totalWinAmount / 100.0) // 基础10倍 + 每盈利100USDT增加0.1倍
+			log.Printf("  ✅ 优秀策略: 只有盈利没有亏损，调整盈亏比为%.2f (总盈利: %.2f)", analysis.ProfitFactor, totalWinAmount)
+		} else if totalLossAmount < 0 {
+			// 只有亏损没有盈利的情况
+			analysis.ProfitFactor = 0.1
+			log.Printf("  ❌ 需要改进: 只有亏损没有盈利，盈亏比设置为0.1")
+		} else {
+			// 既没有盈利也没有亏损的情况
+			analysis.ProfitFactor = 1.0
+			log.Printf("  ⚠️ 无有效交易数据，盈亏比设置为1.0")
 		}
 	}
 
