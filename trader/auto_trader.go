@@ -321,7 +321,8 @@ func (at *AutoTrader) autoSyncBalanceIfNeeded() {
 
 	oldBalance := at.initialBalance
 
-	// 防止除以零：如果初始余额无效，直接更新为实际余额
+	// 🔧 BUG FIX：防止除以零：如果初始余额无效，直接更新为实际余额（仅在首次启动时）
+	// 但要避免在交易过程中重复重置初始余额
 	if oldBalance <= 0 {
 		log.Printf("⚠️ [%s] 初始余额无效 (%.2f)，直接更新为实际余额 %.2f USDT", at.name, oldBalance, actualBalance)
 		at.initialBalance = actualBalance
@@ -347,35 +348,18 @@ func (at *AutoTrader) autoSyncBalanceIfNeeded() {
 
 	changePercent := ((actualBalance - oldBalance) / oldBalance) * 100
 
-	// 变化超过5%才更新
+	// 🔧 BUG FIX：余额大幅变化时，只记录日志，不更新initialBalance
+	// initial余额应该保持固定，用于计算正确的总盈亏
 	if math.Abs(changePercent) > 5.0 {
-		log.Printf("🔔 [%s] 检测到余额大幅变化: %.2f → %.2f USDT (%.2f%%)",
+		log.Printf("🔔 [%s] 检测到余额大幅变化: %.2f → %.2f USDT (%.2f%%) - 注意：这是正常的盈亏波动，不影响初始余额",
 			at.name, oldBalance, actualBalance, changePercent)
 
-		// 更新内存中的 initialBalance
-		at.initialBalance = actualBalance
-
-		// 更新数据库（需要类型断言）
-		if at.database != nil {
-			// 这里需要根据实际的数据库类型进行类型断言
-			// 由于使用了 interface{}，我们需要在 TraderManager 层面处理更新
-			// 或者在这里进行类型检查
-			type DatabaseUpdater interface {
-				UpdateTraderInitialBalance(userID, id string, newBalance float64) error
-			}
-			if db, ok := at.database.(DatabaseUpdater); ok {
-				err := db.UpdateTraderInitialBalance(at.userID, at.id, actualBalance)
-				if err != nil {
-					log.Printf("❌ [%s] 更新数据库失败: %v", at.name, err)
-				} else {
-					log.Printf("✅ [%s] 已自动同步余额到数据库", at.name)
-				}
-			} else {
-				log.Printf("⚠️ [%s] 数据库类型不支持UpdateTraderInitialBalance接口", at.name)
-			}
-		} else {
-			log.Printf("⚠️ [%s] 数据库引用为空，余额仅在内存中更新", at.name)
-		}
+		// 🔧 BUG FIX：不再更新initialBalance，保持初始余额固定用于正确计算总盈亏
+		// initialBalance应该只在以下情况更新：
+		// 1. 交易员首次创建时
+		// 2. 手动重置余额时
+		// 3. 每日重置时（如果启用日盈亏计算）
+		log.Printf("✓ [%s] 保持初始余额 %.2f USDT 不变，确保总盈亏计算正确", at.name, at.initialBalance)
 	} else {
 		log.Printf("✓ [%s] 余额变化不大 (%.2f%%)，无需更新", at.name, changePercent)
 	}
@@ -803,10 +787,25 @@ func (at *AutoTrader) executeDecisionWithRecord(decision *decision.Decision, act
 		return at.executeOpenLongWithRecord(decision, actionRecord)
 	case "open_short":
 		return at.executeOpenShortWithRecord(decision, actionRecord)
-	case "close_long":
-		return at.executeCloseLongWithRecord(decision, actionRecord)
-	case "close_short":
-		return at.executeCloseShortWithRecord(decision, actionRecord)
+	case "close_long", "close_short":
+		// 🔧 BUG FIX：验证实际持仓方向，如果与AI决策不符则自动纠正
+		correctedAction, err := at.validateAndCorrectCloseDirection(decision)
+		if err != nil {
+			log.Printf("  ❌ 持仓方向验证失败: %v", err)
+			return fmt.Errorf("持仓方向验证失败: %v", err)
+		}
+		if correctedAction != decision.Action {
+			log.Printf("  🔧 纠正平仓方向: %s -> %s (基于实际持仓)", decision.Action, correctedAction)
+			decision.Action = correctedAction
+			// 🔧 BUG FIX：同步更新actionRecord中的Action字段
+			actionRecord.Action = correctedAction
+		}
+
+		if decision.Action == "close_long" {
+			return at.executeCloseLongWithRecord(decision, actionRecord)
+		} else {
+			return at.executeCloseShortWithRecord(decision, actionRecord)
+		}
 	case "update_stop_loss":
 		return at.executeUpdateStopLossWithRecord(decision, actionRecord)
 	case "update_take_profit":
@@ -819,6 +818,53 @@ func (at *AutoTrader) executeDecisionWithRecord(decision *decision.Decision, act
 	default:
 		return fmt.Errorf("未知的action: %s", decision.Action)
 	}
+}
+
+// validateAndCorrectCloseDirection 验证并纠正平仓方向
+func (at *AutoTrader) validateAndCorrectCloseDirection(decision *decision.Decision) (string, error) {
+	positions, err := at.trader.GetPositions()
+	if err != nil {
+		log.Printf("  ❌ 无法获取持仓信息进行方向验证: %v", err)
+		return decision.Action, err
+	}
+
+	// 查找指定币种的持仓
+	for _, pos := range positions {
+		if symbol, ok := pos["symbol"].(string); ok && symbol == decision.Symbol {
+			// 检查持仓方向
+			if positionSide, ok := pos["positionSide"].(string); ok {
+				if positionSide == "LONG" {
+					return "close_long", nil
+				} else if positionSide == "SHORT" {
+					return "close_short", nil
+				}
+			}
+
+			// 如果没有positionSide字段，使用side字段或positionAmt判断
+			if side, ok := pos["side"].(string); ok {
+				if side == "long" || side == "LONG" {
+					return "close_long", nil
+				} else if side == "short" || side == "SHORT" {
+					return "close_short", nil
+				}
+			}
+
+			// 最后使用positionAmt的符号判断
+			if positionAmt, ok := pos["positionAmt"].(float64); ok {
+				if positionAmt > 0 {
+					return "close_long", nil
+				} else if positionAmt < 0 {
+					return "close_short", nil
+				}
+			}
+
+			log.Printf("  ⚠️ 无法确定持仓方向: %+v", pos)
+			break
+		}
+	}
+
+	log.Printf("  ⚠️ 未找到 %s 的持仓，保持原始action: %s", decision.Symbol, decision.Action)
+	return decision.Action, nil
 }
 
 // executeOpenLongWithRecord 执行开多仓并记录详细信息
@@ -884,14 +930,56 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, act
 		actionRecord.OrderID = orderID
 	}
 
+	// 🔧 BUG FIX：获取实际成交价格和杠杆倍数
+	var actualPrice float64
+	var actualLeverage int = decision.Leverage // 默认使用AI设定的杠杆
+
+	// 尝试从订单结果获取实际价格
+	if price, ok := order["price"].(float64); ok && price > 0 {
+		actualPrice = price
+	} else if avgPrice, ok := order["avgPrice"].(float64); ok && avgPrice > 0 {
+		actualPrice = avgPrice
+	} else if fills, ok := order["fills"].([]interface{}); ok && len(fills) > 0 {
+		// 从成交明细获取价格
+		if fill, ok := fills[0].(map[string]interface{}); ok {
+			if price, ok := fill["price"].(float64); ok {
+				actualPrice = price
+			}
+		}
+	}
+
+	// 如果没有从订单获取到价格，使用市场价格
+	if actualPrice == 0 {
+		if marketData, err := market.Get(decision.Symbol); err == nil {
+			actualPrice = marketData.CurrentPrice
+		}
+	}
+
+	// 🔧 BUG FIX：从实际持仓获取真实杠杆倍数
+	if positions, err := at.trader.GetPositions(); err == nil {
+		for _, pos := range positions {
+			if symbol, ok := pos["symbol"].(string); ok && symbol == decision.Symbol {
+				if lev, ok := pos["leverage"].(float64); ok {
+					actualLeverage = int(lev)
+					break
+				} else if lev, ok := pos["leverage"].(int); ok {
+					actualLeverage = lev
+					break
+				}
+			}
+		}
+	}
+
+	// 更新记录为实际值
+	actionRecord.Price = actualPrice
+	actionRecord.Leverage = actualLeverage
+
 	// 获取当前价格和保证金信息
 	var marginUsed float64
 	var currentPrice float64
-	if marketData, err := market.Get(decision.Symbol); err == nil {
-		currentPrice = marketData.CurrentPrice
-		// 计算保证金使用量 (数量 * 价格 / 杠杆)
-		marginUsed = (quantity * currentPrice) / float64(decision.Leverage)
-	}
+	currentPrice = actualPrice
+	// 计算保证金使用量 (数量 * 价格 / 实际杠杆)
+	marginUsed = (quantity * currentPrice) / float64(actualLeverage)
 
 	// 计算风险金额（PositionSizeUSD 或 marginUsed）
 	riskAmount := decision.PositionSizeUSD
@@ -900,7 +988,7 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, act
 	}
 
 	logger.Infof("📈 开仓成功: %s | 订单ID: %v | 数量: %.4f | 价格: %.4f | 杠杆: %dx | 保证金: %.2f USDT | 风险: %.2f USDT | 止损: %.4f | 止盈: %.4f | 信心度: %d%%",
-		decision.Symbol, order["orderId"], quantity, currentPrice, decision.Leverage, marginUsed, riskAmount,
+		decision.Symbol, order["orderId"], quantity, currentPrice, actualLeverage, marginUsed, riskAmount,
 		decision.StopLoss, decision.TakeProfit, decision.Confidence)
 
 	// 记录开仓时间
@@ -981,14 +1069,56 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, ac
 		actionRecord.OrderID = orderID
 	}
 
+	// 🔧 BUG FIX：获取实际成交价格和杠杆倍数
+	var actualPrice float64
+	var actualLeverage int = decision.Leverage // 默认使用AI设定的杠杆
+
+	// 尝试从订单结果获取实际价格
+	if price, ok := order["price"].(float64); ok && price > 0 {
+		actualPrice = price
+	} else if avgPrice, ok := order["avgPrice"].(float64); ok && avgPrice > 0 {
+		actualPrice = avgPrice
+	} else if fills, ok := order["fills"].([]interface{}); ok && len(fills) > 0 {
+		// 从成交明细获取价格
+		if fill, ok := fills[0].(map[string]interface{}); ok {
+			if price, ok := fill["price"].(float64); ok {
+				actualPrice = price
+			}
+		}
+	}
+
+	// 如果没有从订单获取到价格，使用市场价格
+	if actualPrice == 0 {
+		if marketData, err := market.Get(decision.Symbol); err == nil {
+			actualPrice = marketData.CurrentPrice
+		}
+	}
+
+	// 🔧 BUG FIX：从实际持仓获取真实杠杆倍数
+	if positions, err := at.trader.GetPositions(); err == nil {
+		for _, pos := range positions {
+			if symbol, ok := pos["symbol"].(string); ok && symbol == decision.Symbol {
+				if lev, ok := pos["leverage"].(float64); ok {
+					actualLeverage = int(lev)
+					break
+				} else if lev, ok := pos["leverage"].(int); ok {
+					actualLeverage = lev
+					break
+				}
+			}
+		}
+	}
+
+	// 更新记录为实际值
+	actionRecord.Price = actualPrice
+	actionRecord.Leverage = actualLeverage
+
 	// 获取当前价格和保证金信息
 	var marginUsed float64
 	var currentPrice float64
-	if marketData, err := market.Get(decision.Symbol); err == nil {
-		currentPrice = marketData.CurrentPrice
-		// 计算保证金使用量 (数量 * 价格 / 杠杆)
-		marginUsed = (quantity * currentPrice) / float64(decision.Leverage)
-	}
+	currentPrice = actualPrice
+	// 计算保证金使用量 (数量 * 价格 / 实际杠杆)
+	marginUsed = (quantity * currentPrice) / float64(actualLeverage)
 
 	// 计算风险金额（PositionSizeUSD 或 marginUsed）
 	riskAmount := decision.PositionSizeUSD
@@ -996,8 +1126,8 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, ac
 		riskAmount = marginUsed
 	}
 
-	logger.Infof("📈 开仓成功: %s | 订单ID: %v | 数量: %.4f | 价格: %.4f | 杠杆: %dx | 保证金: %.2f USDT | 风险: %.2f USDT | 止损: %.4f | 止盈: %.4f | 信心度: %d%%",
-		decision.Symbol, order["orderId"], quantity, currentPrice, decision.Leverage, marginUsed, riskAmount,
+	logger.Infof("📉 开空仓成功: %s | 订单ID: %v | 数量: %.4f | 价格: %.4f | 杠杆: %dx | 保证金: %.2f USDT | 风险: %.2f USDT | 止损: %.4f | 止盈: %.4f | 信心度: %d%%",
+		decision.Symbol, order["orderId"], quantity, currentPrice, actualLeverage, marginUsed, riskAmount,
 		decision.StopLoss, decision.TakeProfit, decision.Confidence)
 
 	// 记录开仓时间
@@ -1095,7 +1225,43 @@ func (at *AutoTrader) executeCloseLongWithRecord(decision *decision.Decision, ac
 		log.Printf("  📝 从决策推算数量: %.4f (金额: %.2f / 价格: %.4f)",
 			positionQuantity, decision.PositionSizeUSD, marketData.CurrentPrice)
 	}
-	actionRecord.Price = marketData.CurrentPrice
+	// 🔧 BUG FIX：平仓前不设置价格，等实际平仓后从订单获取实际成交价格
+
+	// 🔧 BUG FIX：在实际平仓前验证持仓方向，基于实际持仓信息纠正action类型
+	actualPositionSide := "unknown"
+	foundPosition := false
+	if len(positions) > 0 {
+		for _, pos := range positions {
+			if symbol, ok := pos["symbol"].(string); ok && symbol == decision.Symbol {
+				foundPosition = true
+				if side, ok := pos["positionSide"].(string); ok {
+					actualPositionSide = side
+				} else if positionAmt, ok := pos["positionAmt"].(float64); ok {
+					if positionAmt > 0 {
+						actualPositionSide = "LONG"
+					} else if positionAmt < 0 {
+						actualPositionSide = "SHORT"
+					}
+				}
+				break
+			}
+		}
+	}
+
+	// 🔧 BUG FIX：根据实际持仓方向纠正action类型
+	if foundPosition && actualPositionSide != "unknown" {
+		if actualPositionSide == "LONG" && decision.Action == "close_short" {
+			log.Printf("  🔧 纠正平仓方向: 检测到LONG持仓，将close_short纠正为close_long")
+			decision.Action = "close_long"
+			actionRecord.Action = "close_long"
+		} else if actualPositionSide == "SHORT" && decision.Action == "close_long" {
+			log.Printf("  🔧 纠正平仓方向: 检测到SHORT持仓，将close_long纠正为close_short")
+			decision.Action = "close_short"
+			actionRecord.Action = "close_short"
+		}
+	} else if !foundPosition {
+		log.Printf("  ⚠️ 未找到 %s 的持仓信息，无法验证平仓方向", decision.Symbol)
+	}
 
 	// 平仓
 	order, err := at.trader.CloseLong(decision.Symbol, 0) // 0 = 全部平仓
@@ -1108,6 +1274,32 @@ func (at *AutoTrader) executeCloseLongWithRecord(decision *decision.Decision, ac
 		actionRecord.OrderID = orderID
 	}
 
+	// 🔧 BUG FIX：获取实际平仓成交价格
+	var actualClosePrice float64
+	if price, ok := order["price"].(float64); ok && price > 0 {
+		actualClosePrice = price
+	} else if avgPrice, ok := order["avgPrice"].(float64); ok && avgPrice > 0 {
+		actualClosePrice = avgPrice
+	} else if fills, ok := order["fills"].([]interface{}); ok && len(fills) > 0 {
+		// 从成交明细获取价格
+		if fill, ok := fills[0].(map[string]interface{}); ok {
+			if price, ok := fill["price"].(float64); ok {
+				actualClosePrice = price
+			}
+		}
+	}
+
+	// 如果没有从订单获取到实际价格，使用市场价格
+	if actualClosePrice == 0 {
+		actualClosePrice = marketData.CurrentPrice
+		log.Printf("  ⚠️ 无法从订单获取实际价格，使用市场价格: %.4f", actualClosePrice)
+	} else {
+		log.Printf("  ✅ 获取实际平仓价格: %.4f", actualClosePrice)
+	}
+
+	// 🔧 BUG FIX：更新记录为实际成交价格
+	actionRecord.Price = actualClosePrice
+
 	// 判断盈亏状态
 	var pnlEmoji string
 	if preClosePnL > 0 {
@@ -1119,7 +1311,7 @@ func (at *AutoTrader) executeCloseLongWithRecord(decision *decision.Decision, ac
 	}
 
 	logger.Infof("📉 平仓成功: %s | 订单ID: %v | 平仓价格: %.4f | 数量: %.4f | %s 盈亏: %.2f USDT (%.2f%%)",
-		decision.Symbol, order["orderId"], marketData.CurrentPrice, positionQuantity, pnlEmoji, preClosePnL, preClosePnLPct)
+		decision.Symbol, order["orderId"], actualClosePrice, positionQuantity, pnlEmoji, preClosePnL, preClosePnLPct)
 
 	// 保存实时计算的盈亏到actionRecord中
 	actionRecord.RealizedPnL = preClosePnL
@@ -1207,7 +1399,43 @@ func (at *AutoTrader) executeCloseShortWithRecord(decision *decision.Decision, a
 		log.Printf("  📝 从决策推算数量: %.4f (金额: %.2f / 价格: %.4f)",
 			positionQuantity, decision.PositionSizeUSD, marketData.CurrentPrice)
 	}
-	actionRecord.Price = marketData.CurrentPrice
+	// 🔧 BUG FIX：平仓前不设置价格，等实际平仓后从订单获取实际成交价格
+
+	// 🔧 BUG FIX：在实际平仓前验证持仓方向，基于实际持仓信息纠正action类型
+	actualPositionSide := "unknown"
+	foundPosition := false
+	if len(positions) > 0 {
+		for _, pos := range positions {
+			if symbol, ok := pos["symbol"].(string); ok && symbol == decision.Symbol {
+				foundPosition = true
+				if side, ok := pos["positionSide"].(string); ok {
+					actualPositionSide = side
+				} else if positionAmt, ok := pos["positionAmt"].(float64); ok {
+					if positionAmt > 0 {
+						actualPositionSide = "LONG"
+					} else if positionAmt < 0 {
+						actualPositionSide = "SHORT"
+					}
+				}
+				break
+			}
+		}
+	}
+
+	// 🔧 BUG FIX：根据实际持仓方向纠正action类型
+	if foundPosition && actualPositionSide != "unknown" {
+		if actualPositionSide == "LONG" && decision.Action == "close_short" {
+			log.Printf("  🔧 纠正平仓方向: 检测到LONG持仓，将close_short纠正为close_long")
+			decision.Action = "close_long"
+			actionRecord.Action = "close_long"
+		} else if actualPositionSide == "SHORT" && decision.Action == "close_long" {
+			log.Printf("  🔧 纠正平仓方向: 检测到SHORT持仓，将close_long纠正为close_short")
+			decision.Action = "close_short"
+			actionRecord.Action = "close_short"
+		}
+	} else if !foundPosition {
+		log.Printf("  ⚠️ 未找到 %s 的持仓信息，无法验证平仓方向", decision.Symbol)
+	}
 
 	// 平仓
 	order, err := at.trader.CloseShort(decision.Symbol, 0) // 0 = 全部平仓
@@ -1220,6 +1448,32 @@ func (at *AutoTrader) executeCloseShortWithRecord(decision *decision.Decision, a
 		actionRecord.OrderID = orderID
 	}
 
+	// 🔧 BUG FIX：获取实际平仓成交价格
+	var actualClosePrice float64
+	if price, ok := order["price"].(float64); ok && price > 0 {
+		actualClosePrice = price
+	} else if avgPrice, ok := order["avgPrice"].(float64); ok && avgPrice > 0 {
+		actualClosePrice = avgPrice
+	} else if fills, ok := order["fills"].([]interface{}); ok && len(fills) > 0 {
+		// 从成交明细获取价格
+		if fill, ok := fills[0].(map[string]interface{}); ok {
+			if price, ok := fill["price"].(float64); ok {
+				actualClosePrice = price
+			}
+		}
+	}
+
+	// 如果没有从订单获取到实际价格，使用市场价格
+	if actualClosePrice == 0 {
+		actualClosePrice = marketData.CurrentPrice
+		log.Printf("  ⚠️ 无法从订单获取实际价格，使用市场价格: %.4f", actualClosePrice)
+	} else {
+		log.Printf("  ✅ 获取实际平仓价格: %.4f", actualClosePrice)
+	}
+
+	// 🔧 BUG FIX：更新记录为实际成交价格
+	actionRecord.Price = actualClosePrice
+
 	// 判断盈亏状态（做空时盈亏逻辑相反）
 	var pnlEmoji string
 	if preClosePnL > 0 {
@@ -1231,7 +1485,7 @@ func (at *AutoTrader) executeCloseShortWithRecord(decision *decision.Decision, a
 	}
 
 	logger.Infof("📉 平仓成功: %s | 订单ID: %v | 平仓价格: %.4f | 数量: %.4f | %s 盈亏: %.2f USDT (%.2f%%)",
-		decision.Symbol, order["orderId"], marketData.CurrentPrice, positionQuantity, pnlEmoji, preClosePnL, preClosePnLPct)
+		decision.Symbol, order["orderId"], actualClosePrice, positionQuantity, pnlEmoji, preClosePnL, preClosePnLPct)
 
 	// 保存实时计算的盈亏到actionRecord中
 	actionRecord.RealizedPnL = preClosePnL
