@@ -949,7 +949,19 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, act
 		}
 	}
 
-	// 如果没有从订单获取到价格，使用市场价格
+	// 如果还是获取不到真实价格，尝试通过API查询
+	if actualPrice == 0 {
+		if bt, ok := at.trader.(*FuturesTrader); ok && actionRecord.OrderID != 0 {
+			if realPrice, err := bt.GetRealExecutionPrice(decision.Symbol, actionRecord.OrderID); err == nil && realPrice > 0 {
+				actualPrice = realPrice
+				log.Printf("  ✅ 通过API获取真实成交价格: %.4f", actualPrice)
+			} else if err != nil {
+				log.Printf("  ⚠️ 通过API获取真实价格失败: %v", err)
+			}
+		}
+	}
+
+	// 如果最终还是没有获取到价格，使用市场价格
 	if actualPrice == 0 {
 		if marketData, err := market.Get(decision.Symbol); err == nil {
 			actualPrice = marketData.CurrentPrice
@@ -1088,7 +1100,19 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, ac
 		}
 	}
 
-	// 如果没有从订单获取到价格，使用市场价格
+	// 如果还是获取不到真实价格，尝试通过API查询
+	if actualPrice == 0 {
+		if bt, ok := at.trader.(*FuturesTrader); ok && actionRecord.OrderID != 0 {
+			if realPrice, err := bt.GetRealExecutionPrice(decision.Symbol, actionRecord.OrderID); err == nil && realPrice > 0 {
+				actualPrice = realPrice
+				log.Printf("  ✅ 通过API获取真实成交价格: %.4f", actualPrice)
+			} else if err != nil {
+				log.Printf("  ⚠️ 通过API获取真实价格失败: %v", err)
+			}
+		}
+	}
+
+	// 如果最终还是没有获取到价格，使用市场价格
 	if actualPrice == 0 {
 		if marketData, err := market.Get(decision.Symbol); err == nil {
 			actualPrice = marketData.CurrentPrice
@@ -1290,7 +1314,19 @@ func (at *AutoTrader) executeCloseLongWithRecord(decision *decision.Decision, ac
 		}
 	}
 
-	// 如果没有从订单获取到实际价格，使用市场价格
+	// 如果还是获取不到真实价格，尝试通过API查询
+	if actualClosePrice == 0 {
+		if bt, ok := at.trader.(*FuturesTrader); ok && actionRecord.OrderID != 0 {
+			if realPrice, err := bt.GetRealExecutionPrice(decision.Symbol, actionRecord.OrderID); err == nil && realPrice > 0 {
+				actualClosePrice = realPrice
+				log.Printf("  ✅ 通过API获取真实平仓价格: %.4f", actualClosePrice)
+			} else if err != nil {
+				log.Printf("  ⚠️ 通过API获取真实平仓价格失败: %v", err)
+			}
+		}
+	}
+
+	// 如果最终还是没有获取到价格，使用市场价格
 	if actualClosePrice == 0 {
 		actualClosePrice = marketData.CurrentPrice
 		log.Printf("  ⚠️ 无法从订单获取实际价格，使用市场价格: %.4f", actualClosePrice)
@@ -1464,7 +1500,19 @@ func (at *AutoTrader) executeCloseShortWithRecord(decision *decision.Decision, a
 		}
 	}
 
-	// 如果没有从订单获取到实际价格，使用市场价格
+	// 如果还是获取不到真实价格，尝试通过API查询
+	if actualClosePrice == 0 {
+		if bt, ok := at.trader.(*FuturesTrader); ok && actionRecord.OrderID != 0 {
+			if realPrice, err := bt.GetRealExecutionPrice(decision.Symbol, actionRecord.OrderID); err == nil && realPrice > 0 {
+				actualClosePrice = realPrice
+				log.Printf("  ✅ 通过API获取真实平仓价格: %.4f", actualClosePrice)
+			} else if err != nil {
+				log.Printf("  ⚠️ 通过API获取真实平仓价格失败: %v", err)
+			}
+		}
+	}
+
+	// 如果最终还是没有获取到价格，使用市场价格
 	if actualClosePrice == 0 {
 		actualClosePrice = marketData.CurrentPrice
 		log.Printf("  ⚠️ 无法从订单获取实际价格，使用市场价格: %.4f", actualClosePrice)

@@ -602,6 +602,15 @@ func fixMissingQuotes(jsonStr string) string {
 	// ⚠️ 替换全角空格为半角空格（JSON中不应该有全角空格）
 	jsonStr = strings.ReplaceAll(jsonStr, "　", " ") // U+3000 全角空格
 
+	// 🔧 修复JSON键值对中的多余空格（如 "reasoning "内容" -> "reasoning": "内容"）
+	// 使用正则表达式匹配 "key "value" 模式并修复为 "key": "value"
+	re := regexp.MustCompile(`"([^"]+)"\s+"([^"]*)"`)
+	jsonStr = re.ReplaceAllString(jsonStr, `"$1": "$2"`)
+
+	// 🔧 修复数字值的类似问题（如 "number "123" -> "number": 123）
+	reNum := regexp.MustCompile(`"([^"]+)"\s+(\d+)`)
+	jsonStr = reNum.ReplaceAllString(jsonStr, `"$1": $2`)
+
 	return jsonStr
 }
 
@@ -740,11 +749,11 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 		// 🎯 新风控逻辑：基于保证金占用比例而非仓位价值
 		marginUsed := d.PositionSizeUSD / float64(d.Leverage) // 实际占用保证金
 
-		// 单币种保证金占用限制：山寨币30%，BTC/ETH 40%
+		// 单币种保证金占用限制：山寨币30%，BTC/ETH 50%
 		var maxMarginRatio float64
 		var coinType string
 		if d.Symbol == "BTCUSDT" || d.Symbol == "ETHUSDT" {
-			maxMarginRatio = 0.40 // BTC/ETH单币种最多40%保证金
+			maxMarginRatio = 0.50 // BTC/ETH单币种最多50%保证金
 			coinType = "BTC/ETH"
 		} else {
 			maxMarginRatio = 0.30 // 山寨币单币种最多30%保证金

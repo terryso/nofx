@@ -920,6 +920,55 @@ func (t *FuturesTrader) FormatQuantity(symbol string, quantity float64) (string,
 	return fmt.Sprintf(format, quantity), nil
 }
 
+// GetRealExecutionPrice 获取订单的真实成交价格
+func (t *FuturesTrader) GetRealExecutionPrice(symbol string, orderID interface{}) (float64, error) {
+	if orderID == nil {
+		return 0, fmt.Errorf("orderID is nil")
+	}
+
+	var orderIDInt int64
+	switch v := orderID.(type) {
+	case string:
+		id, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("转换订单ID失败: %w", err)
+		}
+		orderIDInt = id
+	case int64:
+		orderIDInt = v
+	case float64:
+		orderIDInt = int64(v)
+	default:
+		return 0, fmt.Errorf("unsupported orderID type: %T", orderID)
+	}
+
+	// 查询订单详情
+	order, err := t.client.NewGetOrderService().Symbol(symbol).OrderID(orderIDInt).Do(context.Background())
+	if err != nil {
+		return 0, fmt.Errorf("获取订单详情失败: %w", err)
+	}
+
+	// 返回平均成交价格
+	if order.AvgPrice != "" {
+		price, err := strconv.ParseFloat(order.AvgPrice, 64)
+		if err != nil {
+			return 0, fmt.Errorf("解析价格失败: %w", err)
+		}
+		return price, nil
+	}
+
+	// 如果没有平均价格，尝试使用原始价格
+	if order.Price != "" {
+		price, err := strconv.ParseFloat(order.Price, 64)
+		if err != nil {
+			return 0, fmt.Errorf("解析原始价格失败: %w", err)
+		}
+		return price, nil
+	}
+
+	return 0, fmt.Errorf("订单没有成交价格信息")
+}
+
 // 辅助函数
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && stringContains(s, substr)
