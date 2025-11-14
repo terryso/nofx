@@ -2,6 +2,9 @@ import { useState, useEffect } from 'react'
 import type { AIModel, Exchange, CreateTraderRequest } from '../types'
 import { useLanguage } from '../contexts/LanguageContext'
 import { t } from '../i18n/translations'
+import { toast } from 'sonner'
+import { Pencil, Plus, X as IconX } from 'lucide-react'
+import { httpClient } from '../lib/httpClient'
 
 // 提取下划线后面的名称部分
 function getShortName(fullName: string): string {
@@ -23,7 +26,7 @@ interface TraderConfigData {
   is_cross_margin: boolean
   use_coin_pool: boolean
   use_oi_top: boolean
-  initial_balance: number
+  initial_balance?: number // 可选：创建时不需要，编辑时使用
   scan_interval_minutes: number
 }
 
@@ -60,7 +63,6 @@ export function TraderConfigModal({
     is_cross_margin: true,
     use_coin_pool: false,
     use_oi_top: false,
-    initial_balance: 1000,
     scan_interval_minutes: 3,
   })
   const [isSaving, setIsSaving] = useState(false)
@@ -114,7 +116,7 @@ export function TraderConfigModal({
   useEffect(() => {
     const fetchConfig = async () => {
       try {
-        const response = await fetch('/api/config')
+        const response = await httpClient.get('/api/config')
         const config = await response.json()
         if (config.default_coins) {
           setAvailableCoins(config.default_coins)
@@ -140,7 +142,7 @@ export function TraderConfigModal({
   useEffect(() => {
     const fetchPromptTemplates = async () => {
       try {
-        const response = await fetch('/api/prompt-templates')
+        const response = await httpClient.get('/api/prompt-templates')
         const data = await response.json()
         if (data.templates) {
           setPromptTemplates(data.templates)
@@ -198,19 +200,17 @@ export function TraderConfigModal({
     setBalanceFetchError('')
 
     try {
-      const token = localStorage.getItem('token')
-      const response = await fetch(
+      const token = localStorage.getItem('auth_token')
+      if (!token) {
+        throw new Error('未登录，请先登录')
+      }
+
+      const response = await httpClient.get(
         `/api/account?trader_id=${traderData.trader_id}`,
         {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
+          Authorization: `Bearer ${token}`,
         }
       )
-
-      if (!response.ok) {
-        throw new Error('获取账户余额失败')
-      }
 
       const data = await response.json()
 
@@ -219,12 +219,11 @@ export function TraderConfigModal({
       const currentBalance = data.total_equity || data.balance || 0
 
       setFormData((prev) => ({ ...prev, initial_balance: currentBalance }))
-
-      // 显示成功提示
-      console.log('已获取当前余额:', currentBalance)
+      toast.success('已获取当前余额')
     } catch (error) {
       console.error('获取余额失败:', error)
       setBalanceFetchError('获取余额失败，请检查网络连接')
+      toast.error('获取余额失败，请检查网络连接')
     } finally {
       setIsFetchingBalance(false)
     }
@@ -248,11 +247,19 @@ export function TraderConfigModal({
         is_cross_margin: formData.is_cross_margin,
         use_coin_pool: formData.use_coin_pool,
         use_oi_top: formData.use_oi_top,
-        initial_balance: formData.initial_balance,
         scan_interval_minutes: formData.scan_interval_minutes,
       }
 
-      await onSave(saveData)
+      // 只在编辑模式时包含initial_balance（用于手动更新）
+      if (isEditMode && formData.initial_balance !== undefined) {
+        saveData.initial_balance = formData.initial_balance
+      }
+
+      await toast.promise(onSave(saveData), {
+        loading: '正在保存…',
+        success: '保存成功',
+        error: '保存失败',
+      })
       onClose()
     } catch (error) {
       console.error('保存失败:', error)
@@ -262,16 +269,21 @@ export function TraderConfigModal({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm p-4 overflow-y-auto">
       <div
-        className="bg-[#1E2329] border border-[#2B3139] rounded-xl shadow-2xl max-w-3xl w-full mx-4 max-h-[90vh] overflow-y-auto"
+        className="bg-[#1E2329] border border-[#2B3139] rounded-xl shadow-2xl max-w-3xl w-full my-8"
+        style={{ maxHeight: 'calc(100vh - 4rem)' }}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
-        <div className="flex items-center justify-between p-6 border-b border-[#2B3139] bg-gradient-to-r from-[#1E2329] to-[#252B35]">
+        <div className="flex items-center justify-between p-6 border-b border-[#2B3139] bg-gradient-to-r from-[#1E2329] to-[#252B35] sticky top-0 z-10 rounded-t-xl">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-[#F0B90B] to-[#E1A706] flex items-center justify-center">
-              <span className="text-lg">{isEditMode ? '✏️' : '➕'}</span>
+            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-[#F0B90B] to-[#E1A706] flex items-center justify-center text-black">
+              {isEditMode ? (
+                <Pencil className="w-5 h-5" />
+              ) : (
+                <Plus className="w-5 h-5" />
+              )}
             </div>
             <div>
               <h2 className="text-xl font-bold text-[#EAECEF]">
@@ -286,12 +298,15 @@ export function TraderConfigModal({
             onClick={onClose}
             className="w-8 h-8 rounded-lg text-[#848E9C] hover:text-[#EAECEF] hover:bg-[#2B3139] transition-colors flex items-center justify-center"
           >
-            ✕
+            <IconX className="w-4 h-4" />
           </button>
         </div>
 
         {/* Content */}
-        <div className="p-6 space-y-8">
+        <div
+          className="p-6 space-y-8 overflow-y-auto"
+          style={{ maxHeight: 'calc(100vh - 16rem)' }}
+        >
           {/* Basic Info */}
           <div className="bg-[#0B0E11] border border-[#2B3139] rounded-lg p-5">
             <h3 className="text-lg font-semibold text-[#EAECEF] mb-5 flex items-center gap-2">
@@ -394,15 +409,12 @@ export function TraderConfigModal({
                     </button>
                   </div>
                 </div>
-                <div>
-                  <div className="flex items-center justify-between mb-2">
-                    <label className="text-sm text-[#EAECEF]">
-                      初始余额 ($)
-                      {!isEditMode && (
-                        <span className="text-[#F0B90B] ml-1">*</span>
-                      )}
-                    </label>
-                    {isEditMode && (
+                {isEditMode && (
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="text-sm text-[#EAECEF]">
+                        初始余额 ($)
+                      </label>
                       <button
                         type="button"
                         onClick={handleFetchCurrentBalance}
@@ -411,33 +423,46 @@ export function TraderConfigModal({
                       >
                         {isFetchingBalance ? '获取中...' : '获取当前余额'}
                       </button>
+                    </div>
+                    <input
+                      type="number"
+                      value={formData.initial_balance || 0}
+                      onChange={(e) =>
+                        handleInputChange(
+                          'initial_balance',
+                          Number(e.target.value)
+                        )
+                      }
+                      onBlur={(e) => {
+                        // Force minimum value on blur
+                        const value = Number(e.target.value)
+                        if (value < 100) {
+                          handleInputChange('initial_balance', 100)
+                        }
+                      }}
+                      className="w-full px-3 py-2 bg-[#0B0E11] border border-[#2B3139] rounded text-[#EAECEF] focus:border-[#F0B90B] focus:outline-none"
+                      min="100"
+                      step="0.01"
+                    />
+                    <p className="text-xs text-[#848E9C] mt-1">
+                      用于手动更新初始余额基准（例如充值/提现后）
+                    </p>
+                    {balanceFetchError && (
+                      <p className="text-xs text-red-500 mt-1">
+                        {balanceFetchError}
+                      </p>
                     )}
                   </div>
-                  <input
-                    type="number"
-                    value={formData.initial_balance}
-                    onChange={(e) =>
-                      handleInputChange(
-                        'initial_balance',
-                        Number(e.target.value)
-                      )
-                    }
-                    onBlur={(e) => {
-                      // Force minimum value on blur
-                      const value = Number(e.target.value)
-                      if (value < 100) {
-                        handleInputChange('initial_balance', 100)
-                      }
-                    }}
-                    className="w-full px-3 py-2 bg-[#0B0E11] border border-[#2B3139] rounded text-[#EAECEF] focus:border-[#F0B90B] focus:outline-none"
-                    min="100"
-                    step="0.01"
-                  />
-                  {!isEditMode && (
-                    <p className="text-xs text-[#F0B90B] mt-1 flex items-center gap-1">
+                )}
+                {!isEditMode && (
+                  <div>
+                    <label className="text-sm text-[#EAECEF] mb-2 block">
+                      初始余额
+                    </label>
+                    <div className="w-full px-3 py-2 bg-[#1E2329] border border-[#2B3139] rounded text-[#848E9C] flex items-center gap-2">
                       <svg
                         xmlns="http://www.w3.org/2000/svg"
-                        className="w-3.5 h-3.5"
+                        className="w-4 h-4 text-[#F0B90B]"
                         viewBox="0 0 24 24"
                         fill="none"
                         stroke="currentColor"
@@ -445,24 +470,16 @@ export function TraderConfigModal({
                         strokeLinecap="round"
                         strokeLinejoin="round"
                       >
-                        <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" />
-                        <line x1="12" x2="12" y1="9" y2="13" />
-                        <line x1="12" x2="12.01" y1="17" y2="17" />
+                        <circle cx="12" cy="12" r="10" />
+                        <line x1="12" x2="12" y1="8" y2="12" />
+                        <line x1="12" x2="12.01" y1="16" y2="16" />
                       </svg>
-                      请输入您交易所账户的当前实际余额。如果输入不准确，P&L统计将会错误。
-                    </p>
-                  )}
-                  {isEditMode && (
-                    <p className="text-xs text-[#848E9C] mt-1">
-                      点击"获取当前余额"按钮可自动获取您交易所账户的当前净值
-                    </p>
-                  )}
-                  {balanceFetchError && (
-                    <p className="text-xs text-red-500 mt-1">
-                      {balanceFetchError}
-                    </p>
-                  )}
-                </div>
+                      <span className="text-sm">
+                        系统将自动获取您的账户净值作为初始余额
+                      </span>
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* 第二行：AI 扫描决策间隔 */}
@@ -764,7 +781,7 @@ export function TraderConfigModal({
         </div>
 
         {/* Footer */}
-        <div className="flex justify-end gap-3 p-6 border-t border-[#2B3139] bg-gradient-to-r from-[#1E2329] to-[#252B35]">
+        <div className="flex justify-end gap-3 p-6 border-t border-[#2B3139] bg-gradient-to-r from-[#1E2329] to-[#252B35] sticky bottom-0 z-10 rounded-b-xl">
           <button
             onClick={onClose}
             className="px-6 py-3 bg-[#2B3139] text-[#EAECEF] rounded-lg hover:bg-[#404750] transition-all duration-200 border border-[#404750]"
